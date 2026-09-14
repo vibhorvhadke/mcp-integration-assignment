@@ -28,6 +28,7 @@ from contextlib import AsyncExitStack
 # Configuration
 # ---------------------------------------------------------
 MCP_SERVER_SCRIPT = "mcp_server/filesystem_mcp_server.py"
+DATABASE_MCP_SERVER_SCRIPT = "mcp_server/database_mcp_server.py"
 
 CANDIDATE_MODELS = [
     "openrouter/free",
@@ -100,9 +101,10 @@ class AgentState(TypedDict):
 
 _mcp_exit_stack = AsyncExitStack()
 _mcp_session = None
+_db_mcp_session = None
 
 async def get_mcp_session():
-    """Lazily connect to the MCP server on first use, then reuse the session."""
+    """Lazily connect to the filesystem MCP server on first use, then reuse the session."""
     global _mcp_session
     if _mcp_session is not None:
         return _mcp_session
@@ -125,8 +127,33 @@ async def get_mcp_session():
     return _mcp_session
 
 
+async def get_db_mcp_session():
+    """Lazily connect to the DATABASE MCP server (bonus: multi-MCP
+    integration) on first use, then reuse the session."""
+    global _db_mcp_session
+    if _db_mcp_session is not None:
+        return _db_mcp_session
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[DATABASE_MCP_SERVER_SCRIPT],
+    )
+    errlog_file = open("db_mcp_server_stderr.log", "w")
+
+    read, write = await _mcp_exit_stack.enter_async_context(
+        stdio_client(server_params, errlog=errlog_file)
+    )
+    session = await _mcp_exit_stack.enter_async_context(
+        ClientSession(read, write)
+    )
+    await session.initialize()
+
+    _db_mcp_session = session
+    return _db_mcp_session
+
+
 async def close_mcp_session():
-    """Cleanly close the MCP server subprocess and connection."""
+    """Cleanly close both MCP server subprocesses and connections."""
     await _mcp_exit_stack.aclose()
 
 
@@ -286,12 +313,28 @@ async def generate_report(state: AgentState):
 
     report_text = "\n".join(report_lines)
 
+    # Filesystem MCP server: write the report file
     session = await get_mcp_session()
     result = await session.call_tool("write_report", {"report_text": report_text})
     report_filename = result.structured_content.get("result", "unknown_path")
-
     print(f"Report saved to: {report_filename}")
-    note = {"role": "system", "content": f"Report generated and saved to {report_filename} (via MCP)."}
+
+    # Database MCP server (bonus - multi-MCP): save each candidate's
+    # screening result for historical tracking
+    db_session = await get_db_mcp_session()
+    for candidate in sorted_shortlist:
+        decision = "Shortlisted" if candidate.get("score", 0) >= 7 else "Not shortlisted"
+        await db_session.call_tool(
+            "save_screening_result",
+            {
+                "candidate_id": candidate.get("candidate_id"),
+                "score": candidate.get("score", 0),
+                "decision": decision,
+            },
+        )
+    print(f"Saved {len(sorted_shortlist)} screening result(s) to database via MCP")
+
+    note = {"role": "system", "content": f"Report generated ({report_filename}) and screening results saved to database - both via MCP."}
     return {"conversation_history": [note], "current_step": "generate_report"}
 
 

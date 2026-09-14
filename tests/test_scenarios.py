@@ -60,3 +60,17 @@ async def run_all_tests(mcp_session, matching_agent_module):
     await test_watch_directory(mcp_session)
     await test_full_agent_workflow(matching_agent_module)
     print("\nAll test scenarios passed!")
+
+
+async def test_database_mcp_server(db_session):
+    print("\n[TEST] database MCP server (save + retrieve)")
+    await db_session.call_tool(
+        "save_screening_result",
+        {"candidate_id": "test_candidate", "score": 8, "decision": "Shortlisted"}
+    )
+    result = await db_session.call_tool(
+        "get_candidate_history", {"candidate_id": "test_candidate"}
+    )
+    history = result.structured_content.get("result", [])
+    assert len(history) > 0, "Expected at least one history record"
+    print(f"PASSED - Retrieved {len(history)} history record(s) for test_candidate")
