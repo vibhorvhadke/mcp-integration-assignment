@@ -1,0 +1,18 @@
+==================================================
+CANDIDATE MATCH REPORT
+==================================================
+Must-have requirements: []
+Nice-to-have requirements: []
+--------------------------------------------------
+
+Rank #1: candidate_3_amit
+Score: 9/10
+Reasoning: 6 years full-stack experience with React, Node.js, and AWS; led a team building a SaaS platform; strongest overall technical depth and leadership.
+
+Rank #2: candidate_1_john
+Score: 7/10
+Reasoning: 4 years frontend experience with React and Redux, specifically building e-commerce dashboards at TechCorp; solid mid-level technical fit.
+
+Rank #3: candidate_2_jane
+Score: 5/10
+Reasoning: 2 years frontend experience with React, TypeScript, and Tailwind CSS; built internal tools at a startup; less experience but relevant modern skills.

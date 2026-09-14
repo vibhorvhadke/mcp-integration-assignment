@@ -60,6 +60,25 @@ llm = get_working_llm()
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 
+def safe_llm_invoke_json(prompt: str, default, max_retries: int = 3):
+    """
+    Call the LLM and parse its response as JSON, retrying a few times
+    if the free/rotating model returns malformed output. Falls back
+    to `default` only after all retries are exhausted.
+    """
+    for attempt in range(max_retries):
+        response = llm.invoke(prompt)
+        raw_output = response.content.strip()
+        if raw_output.startswith("```"):
+            raw_output = raw_output.strip("`").replace("json", "", 1).strip()
+        try:
+            return json.loads(raw_output)
+        except json.JSONDecodeError:
+            print(f"JSON parse failed (attempt {attempt+1}/{max_retries}), retrying...")
+    print("All retries exhausted, using default fallback.")
+    return default
+
+
 # ---------------------------------------------------------
 # Agent State
 # ---------------------------------------------------------
@@ -128,14 +147,7 @@ Respond with ONLY valid JSON in this exact format, no extra text:
 Job Description:
 {jd}
 """
-    response = llm.invoke(prompt)
-    raw_output = response.content.strip()
-    if raw_output.startswith("```"):
-        raw_output = raw_output.strip("`").replace("json", "", 1).strip()
-    try:
-        return json.loads(raw_output)
-    except json.JSONDecodeError:
-        return {"must_have": [], "nice_to_have": []}
+    return safe_llm_invoke_json(prompt, default={"must_have": [], "nice_to_have": []})
 
 
 def compare_candidates(candidate_ids: List[str], all_candidates: List[Dict[str, Any]], requirements: Dict[str, Any]) -> str:
@@ -247,14 +259,7 @@ a list of objects in this exact format:
 ]
 No extra text outside the JSON.
 """
-    response = llm.invoke(prompt)
-    raw_output = response.content.strip()
-    if raw_output.startswith("```"):
-        raw_output = raw_output.strip("`").replace("json", "", 1).strip()
-    try:
-        shortlist = json.loads(raw_output)
-    except json.JSONDecodeError:
-        shortlist = []
+    shortlist = safe_llm_invoke_json(prompt, default=[])
 
     note = {"role": "system", "content": f"Ranked {len(shortlist)} candidates."}
     return {"shortlist": shortlist, "conversation_history": [note], "current_step": "rank_candidates"}
