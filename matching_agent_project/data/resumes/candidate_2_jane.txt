@@ -1,0 +1,4 @@
+Jane Smith
+Experience: 2 years as a Frontend Developer
+Skills: React, TypeScript, Tailwind CSS
+Built internal tools at a startup using React and TypeScript.

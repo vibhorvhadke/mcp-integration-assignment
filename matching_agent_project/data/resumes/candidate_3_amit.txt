@@ -1,0 +1,4 @@
+Amit Kumar
+Experience: 6 years as a Full Stack Developer
+Skills: React, Node.js, AWS, MongoDB
+Led a team building a SaaS platform using React on the frontend and Node.js/AWS on the backend.

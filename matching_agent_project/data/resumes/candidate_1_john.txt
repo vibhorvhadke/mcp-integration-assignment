@@ -1,0 +1,4 @@
+John Doe
+Experience: 4 years as a Frontend Developer
+Skills: React, JavaScript, HTML, CSS, Redux
+Worked at TechCorp building e-commerce dashboards using React and Redux.
