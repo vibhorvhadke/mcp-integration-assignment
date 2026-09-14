@@ -1,0 +1,14 @@
+==================================================
+CANDIDATE MATCH REPORT
+==================================================
+Must-have requirements: ['React', '3+ years experience']
+Nice-to-have requirements: ['TypeScript']
+--------------------------------------------------
+
+Rank #1: candidate_1_john
+Score: 8/10
+Reasoning: Strong React experience.
+
+Rank #2: candidate_3_amit
+Score: 7/10
+Reasoning: Good full-stack fit but less frontend-focused.

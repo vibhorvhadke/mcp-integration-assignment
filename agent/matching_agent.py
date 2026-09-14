@@ -1,18 +1,15 @@
 # ---------------------------------------------------------
-# Step 25 :matching_agent.py
-# LangGraph-based Agentic Profile Matching Agent
+# matching_agent.py (Refactored for MCP Integration - Part B)
 #
-# Consolidates the full agent: state definition, all workflow
-# nodes (parse, extract, search, rank, report, feedback), and
-# the graph wiring with conditional loops. Includes a resilient
-# multi-model LLM fallback and a safety check against bad/echoed
-# LLM responses in the feedback loop.
+# LangGraph-based Agentic Profile Matching Agent.
+# Filesystem access has been REMOVED and replaced with calls
+# to filesystem_mcp_server.py via an MCP client connection.
 # ---------------------------------------------------------
 
 import os
+import sys
 import json
 import time
-import numpy as np
 from datetime import datetime
 from typing import TypedDict, List, Dict, Any, Annotated
 import operator
@@ -21,18 +18,17 @@ from langchain_openai import ChatOpenAI
 from sentence_transformers import SentenceTransformer
 from langgraph.graph import StateGraph, START, END
 
+# MCP client imports - these replace direct filesystem access
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from contextlib import AsyncExitStack
+
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
-BASE_DIR = "matching_agent_project"
-RESUMES_FOLDER = f"{BASE_DIR}/data/resumes"
-REPORTS_FOLDER = f"{BASE_DIR}/reports"
+MCP_SERVER_SCRIPT = "mcp_server/filesystem_mcp_server.py"
 
-# Free model availability on OpenRouter changes frequently and can be
-# temporarily rate-limited/overloaded. We try a short list of candidates
-# in order, retrying on temporary errors, and falling through to the
-# next model on permanent unavailability (404s).
 CANDIDATE_MODELS = [
     "openrouter/free",
 ]
@@ -58,12 +54,9 @@ def get_working_llm(max_retries_per_model=2, wait_seconds=5):
                 else:
                     print(f"Model unavailable: {model_name} ({err_msg}...) - trying next.")
                     break
-    raise RuntimeError("No candidate free models are currently available. Try again shortly, or check https://openrouter.ai/models?max_price=0")
+    raise RuntimeError("No candidate free models are currently available.")
 
 llm = get_working_llm()
-
-# Embedding model for RAG-style resume search (loaded once, reused
-# across every call to search_resumes).
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 
@@ -78,6 +71,44 @@ class AgentState(TypedDict):
     shortlist: List[Dict[str, Any]]
     current_step: str
     last_intent: str
+
+
+# ---------------------------------------------------------
+# MCP Client Connection
+# ---------------------------------------------------------
+# A persistent connection to filesystem_mcp_server.py, kept open
+# for the lifetime of the agent's run (not reopened per tool call).
+
+_mcp_exit_stack = AsyncExitStack()
+_mcp_session = None
+
+async def get_mcp_session():
+    """Lazily connect to the MCP server on first use, then reuse the session."""
+    global _mcp_session
+    if _mcp_session is not None:
+        return _mcp_session
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=[MCP_SERVER_SCRIPT],
+    )
+    errlog_file = open("mcp_server_stderr.log", "w")
+
+    read, write = await _mcp_exit_stack.enter_async_context(
+        stdio_client(server_params, errlog=errlog_file)
+    )
+    session = await _mcp_exit_stack.enter_async_context(
+        ClientSession(read, write)
+    )
+    await session.initialize()
+
+    _mcp_session = session
+    return _mcp_session
+
+
+async def close_mcp_session():
+    """Cleanly close the MCP server subprocess and connection."""
+    await _mcp_exit_stack.aclose()
 
 
 # ---------------------------------------------------------
@@ -153,20 +184,6 @@ focused on verifying their fit against the requirements above.
 
 
 # ---------------------------------------------------------
-# Helper: load resumes from disk
-# ---------------------------------------------------------
-def load_resumes_from_folder(folder_path: str) -> List[Dict[str, str]]:
-    resumes = []
-    for filename in os.listdir(folder_path):
-        if filename.endswith(".txt"):
-            filepath = os.path.join(folder_path, filename)
-            with open(filepath, "r") as f:
-                text = f.read()
-            resumes.append({"candidate_id": filename.replace(".txt", ""), "text": text})
-    return resumes
-
-
-# ---------------------------------------------------------
 # Graph Nodes
 # ---------------------------------------------------------
 
@@ -186,31 +203,20 @@ def extract_requirements_node(state: AgentState):
     return {"requirements": parsed_requirements, "conversation_history": [note], "current_step": "extract_requirements"}
 
 
-def search_resumes(state: AgentState):
-    print("Node running: Search Resumes")
-    resumes = load_resumes_from_folder(RESUMES_FOLDER)
+async def search_resumes(state: AgentState):
+    """MCP-refactored: reads resumes via the MCP server instead of
+    calling load_resumes_from_folder() directly on the filesystem."""
+    print("Node running: Search Resumes (via MCP)")
+    session = await get_mcp_session()
+    result = await session.call_tool("read_resumes", {})
+    resumes = result.structured_content.get("result", [])
+
     if not resumes:
         note = {"role": "system", "content": "Warning: No resumes found to search."}
         return {"candidates": [], "conversation_history": [note], "current_step": "search_resumes"}
 
-    reqs = state.get("requirements", {})
-    query_text = " ".join(reqs.get("must_have", []) + reqs.get("nice_to_have", [])) or state.get("job_description", "")
-
-    query_embedding = embedding_model.encode(query_text)
-    resume_texts = [r["text"] for r in resumes]
-    resume_embeddings = embedding_model.encode(resume_texts)
-
-    def cosine_similarity(a, b):
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-    scored_candidates = []
-    for resume, embedding in zip(resumes, resume_embeddings):
-        score = float(cosine_similarity(query_embedding, embedding))
-        scored_candidates.append({"candidate_id": resume["candidate_id"], "text": resume["text"], "similarity_score": round(score, 4)})
-
-    scored_candidates.sort(key=lambda c: c["similarity_score"], reverse=True)
-    note = {"role": "system", "content": f"Found and scored {len(scored_candidates)} candidates."}
-    return {"candidates": scored_candidates, "conversation_history": [note], "current_step": "search_resumes"}
+    note = {"role": "system", "content": f"Found {len(resumes)} resumes via MCP server."}
+    return {"candidates": resumes, "conversation_history": [note], "current_step": "search_resumes"}
 
 
 def rank_candidates(state: AgentState):
@@ -221,22 +227,22 @@ def rank_candidates(state: AgentState):
         note = {"role": "system", "content": "Warning: No candidates available to rank."}
         return {"shortlist": [], "conversation_history": [note], "current_step": "rank_candidates"}
 
-    candidates_block = ""
+    block = ""
     for c in candidates:
-        candidates_block += f"\nCandidate ID: {c['candidate_id']}\nResume:\n{c['text']}\n---"
+        block += f"\nCandidate ID: {c['candidate_id']}\nResume:\n{c['text']}\n---"
 
     prompt = f"""
-You are a recruiting assistant. Here are the job requirements:
+You are a recruiting assistant. Requirements:
 Must-have: {reqs.get('must_have', [])}
 Nice-to-have: {reqs.get('nice_to_have', [])}
 
-Here are the candidates:
-{candidates_block}
+Candidates:
+{block}
 
-Rank these candidates from best to worst fit for the job.
-Respond with ONLY valid JSON, a list of objects, in this exact format:
+Rank ALL candidates from best to worst fit. Respond with ONLY valid JSON,
+a list of objects in this exact format:
 [
-  {{"candidate_id": "...", "rank": 1, "score": 0-10, "reasoning": "short explanation"}},
+  {{"candidate_id": "...", "rank": 1, "score": 0-10, "reasoning": "..."}},
   ...
 ]
 No extra text outside the JSON.
@@ -254,8 +260,10 @@ No extra text outside the JSON.
     return {"shortlist": shortlist, "conversation_history": [note], "current_step": "rank_candidates"}
 
 
-def generate_report(state: AgentState):
-    print("Node running: Generate Report")
+async def generate_report(state: AgentState):
+    """MCP-refactored: writes the report via the MCP server instead of
+    writing directly to disk with open()."""
+    print("Node running: Generate Report (via MCP)")
     shortlist = state.get("shortlist", [])
     reqs = state.get("requirements", {})
     if not shortlist:
@@ -272,23 +280,17 @@ def generate_report(state: AgentState):
         report_lines.append(f"Reasoning: {candidate.get('reasoning')}")
 
     report_text = "\n".join(report_lines)
-    os.makedirs(REPORTS_FOLDER, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_filename = f"{REPORTS_FOLDER}/report_{timestamp}.txt"
-    with open(report_filename, "w") as f:
-        f.write(report_text)
+
+    session = await get_mcp_session()
+    result = await session.call_tool("write_report", {"report_text": report_text})
+    report_filename = result.structured_content.get("result", "unknown_path")
 
     print(f"Report saved to: {report_filename}")
-    note = {"role": "system", "content": f"Report generated and saved to {report_filename}."}
+    note = {"role": "system", "content": f"Report generated and saved to {report_filename} (via MCP)."}
     return {"conversation_history": [note], "current_step": "generate_report"}
 
 
 def human_feedback(state: AgentState):
-    """
-    Interprets the latest user message (question / update_criteria / end).
-    Includes a safety check against bad/echoed LLM responses so the
-    conversation doesn't end incorrectly due to a weak free-model reply.
-    """
     print("Node running: Human Feedback Loop")
     user_messages = [m for m in state.get("conversation_history", []) if m.get("role") == "user"]
     if not user_messages:
@@ -335,10 +337,6 @@ Rules:
     intent = parsed.get("intent", "end")
     answer = (parsed.get("answer") or "").strip()
 
-    # Safety check: if intent is "end" but the answer is empty or just
-    # echoes the user's own message back, treat it as a misclassification
-    # (a known failure mode with weaker free models) and default to
-    # "question" instead of ending the conversation incorrectly.
     if intent == "end" and (not answer or answer.strip().lower() == latest_message.strip().lower()):
         intent = "question"
         answer = "Sorry, I didn't quite catch that — could you rephrase your question?"
@@ -393,10 +391,10 @@ def build_graph():
 
 
 # ---------------------------------------------------------
-# CLI entry point - allows running this file directly:
-#   python matching_agent.py
+# CLI entry point - now async because search_resumes and
+# generate_report are async (MCP calls). Run with: await main()
 # ---------------------------------------------------------
-if __name__ == "__main__":
+async def main():
     app = build_graph()
 
     sample_jd = """
@@ -405,7 +403,7 @@ if __name__ == "__main__":
     Nice to have: TypeScript, AWS knowledge.
     """
 
-    state = {
+    initial_state = {
         "conversation_history": [],
         "job_description": sample_jd,
         "requirements": {},
@@ -415,27 +413,8 @@ if __name__ == "__main__":
         "last_intent": ""
     }
 
-    state.update(parse_jd(state))
-    state.update(extract_requirements_node(state))
-    state.update(search_resumes(state))
-    state.update(rank_candidates(state))
-    state.update(generate_report(state))
-
-    print("\nInitial screening complete! Type 'done' to exit.\n")
-    while True:
-        user_input = input("You: ").strip()
-        if not user_input:
-            continue
-        state["conversation_history"] = state["conversation_history"] + [{"role": "user", "content": user_input}]
-        state.update(human_feedback(state))
-        intent = state.get("last_intent", "end")
-
-        if intent == "update_criteria":
-            state.update(search_resumes(state))
-            state.update(rank_candidates(state))
-            state.update(generate_report(state))
-            print("\nAgent: Requirements updated - rankings refreshed.\n")
-        else:
-            print(f"\nAgent: {state['conversation_history'][-1]['content']}\n")
-            if intent == "end":
-                break
+    # ainvoke() runs the full graph asynchronously, handling both
+    # sync and async nodes automatically
+    final_state = await app.ainvoke(initial_state)
+    print("\nInitial screening complete!")
+    return final_state
